@@ -31,8 +31,8 @@ app.add_middleware(
 GBSA = joblib.load('GBSA12.18.pkl')
 
 # Get the OpenAI API key from the environment
-openai_api_key = os.environ.get("API_KEY")
-if not openai_api_key:
+openai.api_key = os.environ.get("API_KEY")
+if not openai.api_key:
     raise RuntimeError("OpenAI API_KEY environment variable is not set.")
 
 class PatientInput(BaseModel):
