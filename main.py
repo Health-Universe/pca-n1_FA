@@ -1,7 +1,7 @@
 import io
 import matplotlib.pyplot as plt
 from fastapi.responses import StreamingResponse
-from fastapi import FastAPI, Form, BackgroundTasks
+from fastapi import FastAPI, Form, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -27,7 +27,11 @@ app.add_middleware(
 )
 
 # Load the trained model
-GBSA = joblib.load('GBSA12.18.pkl')
+try:
+    GBSA = joblib.load('GBSA12.18.pkl')
+except Exception as e:
+    print(f"Error loading model: {e}")
+    raise HTTPException(status_code=500, detail="Error loading the model")
 
 # Set OpenAI API key
 openai.api_key = os.getenv("API_KEY")
@@ -99,81 +103,88 @@ def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_enco
 
 @app.post("/predict_survival", response_model=SurvivalPrediction, summary="Predict Survival Probabilities and Plot Survival Curve")
 async def predict_survival(background_tasks: BackgroundTasks, patient_data: Annotated[PatientData, Form()]):
-    age_encoding = encode_one_hot(patient_data.age, ['61-69', '≤60', '≥70'])
-    race_encoding = encode_one_hot(patient_data.race, ['Black', 'Other', 'White'])
-    marital_encoding = encode_one_hot(patient_data.marital, ['Married', 'Unmarried'])
-    clinical_encoding = encode_one_hot(patient_data.clinical, ['T1-T3a', 'T3b', 'T4'])
-    radio_encoding = encode_one_hot(patient_data.radio, ['No', 'Yes'])
-    therapy_encoding = encode_one_hot(patient_data.therapy, ['No', 'Yes'])
-    nodes_encoding = encode_one_hot(patient_data.nodes, ['≥3', 'No nodes were examined', '1', '2'])
-    gs_encoding = encode_one_hot(patient_data.gs, ['7(4+3)', '8', '≤7(3+4)', '≥9'])
+    try:
+        age_encoding = encode_one_hot(patient_data.age, ['61-69', '≤60', '≥70'])
+        race_encoding = encode_one_hot(patient_data.race, ['Black', 'Other', 'White'])
+        marital_encoding = encode_one_hot(patient_data.marital, ['Married', 'Unmarried'])
+        clinical_encoding = encode_one_hot(patient_data.clinical, ['T1-T3a', 'T3b', 'T4'])
+        radio_encoding = encode_one_hot(patient_data.radio, ['No', 'Yes'])
+        therapy_encoding = encode_one_hot(patient_data.therapy, ['No', 'Yes'])
+        nodes_encoding = encode_one_hot(patient_data.nodes, ['≥3', 'No nodes were examined', '1', '2'])
+        gs_encoding = encode_one_hot(patient_data.gs, ['7(4+3)', '8', '≤7(3+4)', '≥9'])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing patient data: {e}")
     
-    features = []
-    features.extend(age_encoding)
-    features.extend(race_encoding)
-    features.extend(marital_encoding)
-    features.extend(clinical_encoding)
-    features.extend(radio_encoding)
-    features.extend(therapy_encoding)
-    features.extend(nodes_encoding)
-    features.extend(gs_encoding)
-    
-    x_df = pd.DataFrame([features], columns=[
-        'Age_61-69', 'Age_<=60', 'Age_>=70', 'Race_Black', 'Race_Other', 'Race_White', 
-        'Marital_Married', 'Marital_Unmarried', 'CS.extension_T1_T3a', 'CS.extension_T3b', 
-        'CS.extension_T4', 'Radiation_None/Unknown', 'Radiation_Yes', 'Therapy_None', 
-        'Therapy_RP', 'Nodes.positive_>=3', 'Nodes.positive_None', 'Nodes.positive_One', 
-        'Nodes.positive_Two', 'Gleason.Patterns_4+3', 'Gleason.Patterns_8', 
-        'Gleason.Patterns_<=3+4', 'Gleason.Patterns_>=9'
-    ])
-    
-    x_psa_df = pd.DataFrame([patient_data.psa], columns=['PSA'])
-    x_test = pd.concat([x_df, x_psa_df], axis=1)
-    
-    prob = GBSA.predict(x_test)
-    surv = GBSA.predict_survival_function(x_test)
-    
-    yv = []
-    fn = next(iter(surv))
-    for i in range(0, len(fn.x)):
-        if fn.x[i] in (36, 60, 96, 119):
-            yv.append(fn(fn.x)[i])
-    
-    explanation = get_explanation(
-        patient_data, yv, age_encoding, race_encoding, clinical_encoding, 
-        gs_encoding, nodes_encoding, patient_data.therapy, patient_data.radio
-    )
-    
-    survival_probs = {
-        "36-month": float(yv[0]),
-        "60-month": float(yv[1]),
-        "96-month": float(yv[2]),
-        "119-month": float(yv[3])
-    }
-    
-    survival_curve_points = []
-    for i in range(0, 120):
-        if i < len(fn.x):
-            survival_curve_points.append(SurvivalTimePoint(time=int(fn.x[i]), probability=float(fn(fn.x)[i])))
+    try:
+        features = []
+        features.extend(age_encoding)
+        features.extend(race_encoding)
+        features.extend(marital_encoding)
+        features.extend(clinical_encoding)
+        features.extend(radio_encoding)
+        features.extend(therapy_encoding)
+        features.extend(nodes_encoding)
+        features.extend(gs_encoding)
+        
+        x_df = pd.DataFrame([features], columns=[
+            'Age_61-69', 'Age_<=60', 'Age_>=70', 'Race_Black', 'Race_Other', 'Race_White', 
+            'Marital_Married', 'Marital_Unmarried', 'CS.extension_T1_T3a', 'CS.extension_T3b', 
+            'CS.extension_T4', 'Radiation_None/Unknown', 'Radiation_Yes', 'Therapy_None', 
+            'Therapy_RP', 'Nodes.positive_>=3', 'Nodes.positive_None', 'Nodes.positive_One', 
+            'Nodes.positive_Two', 'Gleason.Patterns_4+3', 'Gleason.Patterns_8', 
+            'Gleason.Patterns_<=3+4', 'Gleason.Patterns_>=9'
+        ])
+        
+        x_psa_df = pd.DataFrame([patient_data.psa], columns=['PSA'])
+        x_test = pd.concat([x_df, x_psa_df], axis=1)
+        
+        prob = GBSA.predict(x_test)
+        surv = GBSA.predict_survival_function(x_test)
+        
+        yv = []
+        fn = next(iter(surv))
+        for i in range(0, len(fn.x)):
+            if fn.x[i] in (36, 60, 96, 119):
+                yv.append(fn(fn.x)[i])
+        
+        explanation = get_explanation(
+            patient_data, yv, age_encoding, race_encoding, clinical_encoding, 
+            gs_encoding, nodes_encoding, patient_data.therapy, patient_data.radio
+        )
+        
+        survival_probs = {
+            "36-month": float(yv[0]),
+            "60-month": float(yv[1]),
+            "96-month": float(yv[2]),
+            "119-month": float(yv[3])
+        }
+        
+        survival_curve_points = []
+        for i in range(0, 120):
+            if i < len(fn.x):
+                survival_curve_points.append(SurvivalTimePoint(time=int(fn.x[i]), probability=float(fn(fn.x)[i])))
 
-    # Plot the survival curve
-    plt.figure(figsize=(8, 6))
-    plt.plot(fn.x, fn(fn.x), label="Survival Probability", color='blue')
-    plt.title("Survival Curve")
-    plt.xlabel("Time (months)")
-    plt.ylabel("Survival Probability")
-    plt.grid(True)
-    plt.axhline(0.5, color='red', linestyle='--', label='50% Survival Probability')
+        # Plot the survival curve
+        plt.figure(figsize=(8, 6))
+        plt.plot(fn.x, fn(fn.x), label="Survival Probability", color='blue')
+        plt.title("Survival Curve")
+        plt.xlabel("Time (months)")
+        plt.ylabel("Survival Probability")
+        plt.grid(True)
+        plt.axhline(0.5, color='red', linestyle='--', label='50% Survival Probability')
 
-    # Save the plot to a byte stream
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
+        # Save the plot to a byte stream
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        
+        # Return the data and the image in the response
+        return {
+            "survival_probabilities": survival_probs,
+            "survival_curve": survival_curve_points,
+            "explanation": explanation,
+            "survival_curve_image": StreamingResponse(buf, media_type="image/png")
+        }
     
-    # Return the data and the image in the response
-    return {
-        "survival_probabilities": survival_probs,
-        "survival_curve": survival_curve_points,
-        "explanation": explanation,
-        "survival_curve_image": StreamingResponse(buf, media_type="image/png")
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error in prediction process: {e}")
