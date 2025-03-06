@@ -5,10 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Literal, Annotated, List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import joblib
-import io
-import base64
 import openai
 import os
 
@@ -31,6 +28,20 @@ GBSA = joblib.load('GBSA12.18.pkl')
 
 # Set OpenAI API key
 openai.api_key = os.getenv("API_KEY")
+
+# Data point model for survival curve
+class SurvivalTimePoint(BaseModel):
+    """
+    Data point representing survival probability at a specific time point.
+    """
+    time: int = Field(
+        title="Time (months)",
+        description="Time point in months from diagnosis."
+    )
+    probability: float = Field(
+        title="Survival Probability",
+        description="Predicted survival probability at the given time point."
+    )
 
 # Input Model
 class PatientData(BaseModel):
@@ -77,17 +88,13 @@ class SurvivalPrediction(BaseModel):
         title="Survival Probabilities", 
         description="Predicted survival probabilities at various time points")
     
-    survival_curve_data: Dict[str, List[float]] = Field(..., 
+    survival_curve: List[SurvivalTimePoint] = Field(..., 
         title="Survival Curve Data", 
         description="Data points for plotting the survival curve")
     
     explanation: str = Field(..., 
         title="Explanation", 
         description="AI-generated explanation of the results")
-    
-    plot_image: Optional[str] = Field(None, 
-        title="Plot Image", 
-        description="Base64 encoded survival curve plot")
 
 def encode_one_hot(value, categories):
     """Convert categorical value to one-hot encoding"""
@@ -95,26 +102,6 @@ def encode_one_hot(value, categories):
     if value in categories:
         result[categories.index(value)] = 1
     return result
-
-def generate_plot(fn):
-    """Generate survival probability curve plot"""
-    fig = plt.figure(figsize=(8, 6))
-    plt.plot(fn.x[0:120], fn(fn.x)[0:120])
-    plt.xlim(0, 120)
-    plt.ylabel("Survival probability")
-    plt.xlabel("Survival time (mo)")
-    plt.grid(True)
-    
-    # Save plot to bytes object
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    
-    # Encode the image to base64
-    img_str = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close(fig)
-    
-    return img_str
 
 def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_encoding, 
                    gs_encoding, nodes_encoding, therapy_value, radio_value):
@@ -169,7 +156,9 @@ def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_enco
     
     return response.choices[0].message.content.strip()
 
-@app.post("/predict_survival", response_model=SurvivalPrediction)
+@app.post("/predict_survival", response_model=SurvivalPrediction, 
+          summary="Predict Survival Probabilities",
+          openapi_extra={"x-chart-type": "line_chart"})
 async def predict_survival(
     background_tasks: BackgroundTasks,
     patient_data: Annotated[PatientData, Form()]
@@ -224,16 +213,13 @@ async def predict_survival(
         if fn.x[i] in (36, 60, 96, 119):
             yv.append(fn(fn.x)[i])
     
-    # Generate plot
-    plot_img = generate_plot(fn)
-    
     # Get explanation
     explanation = get_explanation(
         patient_data, yv, age_encoding, race_encoding, clinical_encoding, 
         gs_encoding, nodes_encoding, patient_data.therapy, patient_data.radio
     )
     
-    # Prepare response
+    # Prepare survival probabilities for specific timepoints
     survival_probs = {
         "36-month": float(yv[0]),
         "60-month": float(yv[1]),
@@ -241,14 +227,19 @@ async def predict_survival(
         "119-month": float(yv[3])
     }
     
-    survival_curve = {
-        "time": fn.x[0:120].tolist(),
-        "probability": fn(fn.x)[0:120].tolist()
-    }
+    # Prepare survival curve data points (similar to the caloric calculator approach)
+    survival_curve_points = []
+    for i in range(0, 120):  # 0 to 119 months
+        if i < len(fn.x):
+            survival_curve_points.append(
+                SurvivalTimePoint(
+                    time=int(fn.x[i]),
+                    probability=float(fn(fn.x)[i])
+                )
+            )
     
     return SurvivalPrediction(
         survival_probabilities=survival_probs,
-        survival_curve_data=survival_curve,
-        explanation=explanation,
-        plot_image=plot_img
+        survival_curve=survival_curve_points,
+        explanation=explanation
     )
