@@ -11,3 +11,4 @@ scikit-learn==1.0.2
 scikit-survival==0.17.2
 setuptools
 openai==0.28
+seaborn
