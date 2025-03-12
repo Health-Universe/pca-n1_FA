@@ -1,18 +1,13 @@
-from fastapi import FastAPI, Form, BackgroundTasks, Depends, Response
+from fastapi import FastAPI, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import Literal, List, Dict, Optional
+from typing import Literal, Annotated, List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
 import joblib
-import openai  # Using older openai==0.28
+import openai
 import os
-import io
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 app = FastAPI(
     title="Machine Learning Prognostic Model for Prostate Cancer Patients with Lymph Node-positive",
@@ -29,12 +24,7 @@ app.add_middleware(
 )
 
 # Load the trained model
-try:
-    GBSA = joblib.load('GBSA12.18.pkl')
-except Exception as e:
-    print(f"Error loading model: {e}")
-    # Create a placeholder if model fails to load (for testing)
-    GBSA = None
+GBSA = joblib.load('GBSA12.18.pkl')
 
 # Set OpenAI API key
 openai.api_key = os.getenv("API_KEY")
@@ -53,29 +43,44 @@ class SurvivalTimePoint(BaseModel):
         description="Predicted survival probability at the given time point."
     )
 
-# Form data class for receiving patient data
-class PatientDataForm:
-    def __init__(
-        self,
-        age: str = Form(...),
-        race: str = Form(...),
-        marital: str = Form(...),
-        clinical: str = Form(...),
-        psa: float = Form(...),
-        gs: str = Form(...),
-        nodes: str = Form(...),
-        therapy: str = Form(...),
-        radio: str = Form(...)
-    ):
-        self.age = age
-        self.race = race
-        self.marital = marital
-        self.clinical = clinical
-        self.psa = psa
-        self.gs = gs
-        self.nodes = nodes
-        self.therapy = therapy
-        self.radio = radio
+# Input Model
+class PatientData(BaseModel):
+    age: Literal['≤60', '61-69', '≥70'] = Field(..., 
+        title="Age", 
+        description="Patient's age group")
+    
+    race: Literal['White', 'Black', 'Other'] = Field(..., 
+        title="Race", 
+        description="Patient's race")
+    
+    marital: Literal['Married', 'Unmarried'] = Field(..., 
+        title="Marital Status", 
+        description="Patient's marital status")
+    
+    clinical: Literal['T1-T3a', 'T3b', 'T4'] = Field(..., 
+        title="Clinical T stage", 
+        description="Extent of the tumor")
+    
+    psa: float = Field(..., 
+        title="PSA level", 
+        ge=0.1, le=98.0, 
+        description="Prostate-Specific Antigen level (ng/mL)")
+    
+    gs: Literal['≤7(3+4)', '7(4+3)', '8', '≥9'] = Field(..., 
+        title="Gleason Score", 
+        description="Score used to assess aggressiveness of prostate cancer")
+    
+    nodes: Literal['1', '2', '≥3', 'No nodes were examined'] = Field(..., 
+        title="Number of positive lymph nodes", 
+        description="Number of positive lymph nodes found")
+    
+    therapy: Literal['Yes', 'No'] = Field(..., 
+        title="Radical prostatectomy", 
+        description="Whether patient has undergone radical prostatectomy")
+    
+    radio: Literal['Yes', 'No'] = Field(..., 
+        title="Radiotherapy", 
+        description="Whether patient has received radiotherapy")
 
 # Output Model
 class SurvivalPrediction(BaseModel):
@@ -83,25 +88,46 @@ class SurvivalPrediction(BaseModel):
         title="Survival Probabilities", 
         description="Predicted survival probabilities at various time points")
     
+    survival_curve: List[SurvivalTimePoint] = Field(..., 
+        title="Survival Curve Data", 
+        description="Data points for plotting the survival curve")
+    
     explanation: str = Field(..., 
         title="Explanation", 
         description="AI-generated explanation of the results")
 
-def get_explanation(patient_data, yv):
-    """Generate explanation using OpenAI API (version 0.28)"""
+def encode_one_hot(value, categories):
+    """Convert categorical value to one-hot encoding"""
+    result = [0] * len(categories)
+    if value in categories:
+        result[categories.index(value)] = 1
+    return result
+
+def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_encoding, 
+                   gs_encoding, nodes_encoding, therapy_value, radio_value):
+    """Generate explanation using OpenAI API"""
+    
+    # Format patient data for prompt
+    age_str = "≤60" if age_encoding[1] == 1 else "61-69" if age_encoding[0] == 1 else "≥70"
+    race_str = "Black" if race_encoding[0] == 1 else "Other" if race_encoding[1] == 1 else "White"
+    clinical_str = "T1-T3a" if clinical_encoding[0] == 1 else "T3b" if clinical_encoding[1] == 1 else "T4"
+    
+    gs_str = "7(4+3)" if gs_encoding[0] == 1 else "8" if gs_encoding[1] == 1 else "≤7(3+4)" if gs_encoding[2] == 1 else "≥9"
+    
+    nodes_str = "≥3" if nodes_encoding[0] == 1 else "No nodes examined" if nodes_encoding[1] == 1 else "1" if nodes_encoding[2] == 1 else "2"
     
     prompt = f"""
     As a medical professional, provide a comprehensive and empathetic interpretation of the survival probabilities for this prostate cancer patient:
 
     Patient Characteristics:
-    - Age Group: {patient_data.age}
-    - Race: {patient_data.race}
-    - Clinical T Stage: {patient_data.clinical}
+    - Age Group: {age_str}
+    - Race: {race_str}
+    - Clinical T Stage: {clinical_str}
     - PSA Level: {patient_data.psa} ng/mL
-    - Gleason Score: {patient_data.gs}
-    - Positive Lymph Nodes: {patient_data.nodes}
-    - Radical Prostatectomy: {patient_data.therapy}
-    - Radiotherapy: {patient_data.radio}
+    - Gleason Score: {gs_str}
+    - Positive Lymph Nodes: {nodes_str}
+    - Radical Prostatectomy: {therapy_value}
+    - Radiotherapy: {radio_value}
 
     Survival Probabilities:
     - 36-month survival: {yv[0]:.2%}
@@ -119,88 +145,49 @@ def get_explanation(patient_data, yv):
     Write in a clear, compassionate, and professional tone suitable for sharing with both healthcare providers and patients.
     """
     
-    try:
-        # Using OpenAI 0.28 syntax
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a medical professional providing detailed explanations of cancer survival predictions."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"OpenAI API error: {e}")
-        return "Unable to generate explanation. Please review the statistical data provided."
+    response = openai.ChatCompletion.create(
+        model="gpt-4o",  # Using the model from your original code
+        messages=[
+            {"role": "system", "content": "You are a medical professional providing detailed explanations of cancer survival predictions."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0,
+    )
+    
+    return response.choices[0].message.content.strip()
 
-def create_survival_plot(survival_curve_points, key_timepoints):
-    """Create a plot of the survival curve"""
-    # Set the style
-    sns.set_style("whitegrid")
-    plt.figure(figsize=(10, 6))
-    
-    # Extract time and probability from survival curve points
-    times = [point.time for point in survival_curve_points]
-    probabilities = [point.probability for point in survival_curve_points]
-    
-    # Plot the survival curve
-    plt.plot(times, probabilities, 'b-', linewidth=2)
-    
-    # Add markers for key timepoints
-    for label, value in key_timepoints.items():
-        month = int(label.split('-')[0])
-        plt.scatter(month, value, color='red', s=60, zorder=5)
-        plt.annotate(f"{label}: {value:.1%}", 
-                     (month, value), 
-                     xytext=(5, 5), 
-                     textcoords='offset points',
-                     fontsize=9)
-    
-    # Set plot labels and title
-    plt.title('Prostate Cancer Survival Probability', fontsize=14, fontweight='bold')
-    plt.xlabel('Time (months)', fontsize=12)
-    plt.ylabel('Survival Probability', fontsize=12)
-    plt.ylim(0, 1.05)
-    plt.xlim(0, max(times) + 5)
-    
-    # Format y-axis as percentage
-    plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
-    
-    # Add grid
-    plt.grid(True, alpha=0.3)
-    
-    # Add a legend
-    plt.legend(['Survival Curve', 'Key Timepoints'], loc='lower left')
-    
-    # Save plot to a bytes buffer
-    buf = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format='png', dpi=100)
-    buf.seek(0)
-    plt.close()
-    
-    return buf
-
-@app.post("/predict_survival")
+@app.post("/predict_survival", response_model=SurvivalPrediction, 
+          summary="Predict Survival Probabilities",
+          openapi_extra={"x-chart-type": "line_chart"})
 async def predict_survival(
     background_tasks: BackgroundTasks,
-    patient_data: PatientDataForm = Depends()
+    patient_data: Annotated[PatientData, Form()]
 ):
     """Predict survival probabilities for prostate cancer patients with lymph node-positive status."""
     
-    # Map input values to model expected categories
-    age_map = {'≤60': 'Age_<=60', '61-69': 'Age_61-69', '≥70': 'Age_>=70'}
-    race_map = {'White': 'Race_White', 'Black': 'Race_Black', 'Other': 'Race_Other'}
-    marital_map = {'Married': 'Marital_Married', 'Unmarried': 'Marital_Unmarried'}
-    clinical_map = {'T1-T3a': 'CS.extension_T1_T3a', 'T3b': 'CS.extension_T3b', 'T4': 'CS.extension_T4'}
-    gs_map = {'≤7(3+4)': 'Gleason.Patterns_<=3+4', '7(4+3)': 'Gleason.Patterns_4+3', 
-              '8': 'Gleason.Patterns_8', '≥9': 'Gleason.Patterns_>=9'}
-    nodes_map = {'1': 'Nodes.positive_One', '2': 'Nodes.positive_Two', 
-                '≥3': 'Nodes.positive_>=3', 'No nodes were examined': 'Nodes.positive_None'}
+    # Convert categorical variables to one-hot encoding
+    age_encoding = encode_one_hot(patient_data.age, ['61-69', '≤60', '≥70'])
+    race_encoding = encode_one_hot(patient_data.race, ['Black', 'Other', 'White'])
+    marital_encoding = encode_one_hot(patient_data.marital, ['Married', 'Unmarried'])
+    clinical_encoding = encode_one_hot(patient_data.clinical, ['T1-T3a', 'T3b', 'T4'])
+    radio_encoding = encode_one_hot(patient_data.radio, ['No', 'Yes'])
+    therapy_encoding = encode_one_hot(patient_data.therapy, ['No', 'Yes'])
+    nodes_encoding = encode_one_hot(patient_data.nodes, ['≥3', 'No nodes were examined', '1', '2'])
+    gs_encoding = encode_one_hot(patient_data.gs, ['7(4+3)', '8', '≤7(3+4)', '≥9'])
     
-    # Create dataframe with all columns needed by the model
-    columns = [
+    # Combine all features
+    features = []
+    features.extend(age_encoding)
+    features.extend(race_encoding)
+    features.extend(marital_encoding)
+    features.extend(clinical_encoding)
+    features.extend(radio_encoding)
+    features.extend(therapy_encoding)
+    features.extend(nodes_encoding)
+    features.extend(gs_encoding)
+    
+    # Create feature dataframe
+    x_df = pd.DataFrame([features], columns=[
         'Age_61-69', 'Age_<=60', 'Age_>=70',
         'Race_Black', 'Race_Other', 'Race_White',
         'Marital_Married', 'Marital_Unmarried',
@@ -208,145 +195,51 @@ async def predict_survival(
         'Radiation_None/Unknown', 'Radiation_Yes',
         'Therapy_None', 'Therapy_RP',
         'Nodes.positive_>=3', 'Nodes.positive_None', 'Nodes.positive_One', 'Nodes.positive_Two',
-        'Gleason.Patterns_4+3', 'Gleason.Patterns_8', 'Gleason.Patterns_<=3+4', 'Gleason.Patterns_>=9',
-        'PSA'
-    ]
+        'Gleason.Patterns_4+3', 'Gleason.Patterns_8', 'Gleason.Patterns_<=3+4', 'Gleason.Patterns_>=9'
+    ])
     
-    # Initialize with zeros
-    data = {col: [0] for col in columns}
-    df = pd.DataFrame(data)
+    # Add PSA level
+    x_psa_df = pd.DataFrame([patient_data.psa], columns=['PSA'])
+    x_test = pd.concat([x_df, x_psa_df], axis=1)
     
-    # Set values based on patient data
-    try:
-        # Age
-        if patient_data.age in age_map:
-            df[age_map[patient_data.age]] = 1
-            
-        # Race  
-        if patient_data.race in race_map:
-            df[race_map[patient_data.race]] = 1
-            
-        # Marital status
-        if patient_data.marital in marital_map:
-            df[marital_map[patient_data.marital]] = 1
-            
-        # Clinical T stage
-        if patient_data.clinical in clinical_map:
-            df[clinical_map[patient_data.clinical]] = 1
-            
-        # Gleason score
-        if patient_data.gs in gs_map:
-            df[gs_map[patient_data.gs]] = 1
-            
-        # Nodes positive
-        if patient_data.nodes in nodes_map:
-            df[nodes_map[patient_data.nodes]] = 1
-            
-        # Radiotherapy
-        if patient_data.radio == 'Yes':
-            df['Radiation_Yes'] = 1
-        else:
-            df['Radiation_None/Unknown'] = 1
-            
-        # Radical prostatectomy
-        if patient_data.therapy == 'Yes':
-            df['Therapy_RP'] = 1
-        else:
-            df['Therapy_None'] = 1
-            
-        # PSA level
-        df['PSA'] = patient_data.psa
-        
-    except Exception as e:
-        print(f"Error preparing data: {e}")
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Invalid input data: {str(e)}"}
-        )
+    # Make prediction
+    prob = GBSA.predict(x_test)
+    surv = GBSA.predict_survival_function(x_test)
     
-    # If model failed to load, return mock data for testing
-    if GBSA is None:
-        mock_probabilities = {
-            "36-month": 0.85,
-            "60-month": 0.70,
-            "96-month": 0.55,
-            "119-month": 0.45
-        }
-        
-        mock_curve = [
-            SurvivalTimePoint(time=i, probability=1.0 * (0.995 ** i))
-            for i in range(120)
-        ]
-        
-        # Create a mock plot
-        plot_buffer = create_survival_plot(mock_curve, mock_probabilities)
-        
-        # Generate explanation
-        explanation = "This is a mock explanation as the model is not available. In a real scenario, this would contain a detailed clinical interpretation of the patient's predicted survival curve."
-        
-        # Return the plot image
-        return StreamingResponse(plot_buffer, media_type="image/png")
+    # Extract survival probabilities at specific time points
+    yv = []
+    fn = next(iter(surv))
+    for i in range(0, len(fn.x)):
+        if fn.x[i] in (36, 60, 96, 119):
+            yv.append(fn(fn.x)[i])
     
-    try:
-        # Make prediction
-        surv = GBSA.predict_survival_function(df)
-        
-        # Extract the function
-        fn = next(iter(surv))
-        
-        # Timepoints of interest
-        target_timepoints = [36, 60, 96, 119]
-        yv = []
-        
-        # Find closest available timepoints
-        for target in target_timepoints:
-            closest_idx = min(range(len(fn.x)), key=lambda i: abs(fn.x[i] - target))
-            yv.append(fn(fn.x)[closest_idx])
-        
-        # Get explanation
-        explanation = get_explanation(patient_data, yv)
-        
-        # Survival probabilities at specific timepoints
-        survival_probs = {
-            "36-month": float(yv[0]),
-            "60-month": float(yv[1]),
-            "96-month": float(yv[2]),
-            "119-month": float(yv[3])
-        }
-        
-        # Create survival curve data points
-        survival_curve_points = []
-        for i in range(len(fn.x)):
+    # Get explanation
+    explanation = get_explanation(
+        patient_data, yv, age_encoding, race_encoding, clinical_encoding, 
+        gs_encoding, nodes_encoding, patient_data.therapy, patient_data.radio
+    )
+    
+    # Prepare survival probabilities for specific timepoints
+    survival_probs = {
+        "36-month": float(yv[0]),
+        "60-month": float(yv[1]),
+        "96-month": float(yv[2]),
+        "119-month": float(yv[3])
+    }
+    
+    # Prepare survival curve data points (similar to the caloric calculator approach)
+    survival_curve_points = []
+    for i in range(0, 120):  # 0 to 119 months
+        if i < len(fn.x):
             survival_curve_points.append(
                 SurvivalTimePoint(
                     time=int(fn.x[i]),
                     probability=float(fn(fn.x)[i])
                 )
             )
-        
-        # Create the plot
-        plot_buffer = create_survival_plot(survival_curve_points, survival_probs)
-        
-        # Return the plot image
-        return StreamingResponse(plot_buffer, media_type="image/png")
     
-    except Exception as e:
-        print(f"Prediction error: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Prediction failed: {str(e)}"}
-        )
-
-# Add a JSON response endpoint as well for flexibility
-@app.post("/predict_survival_json", response_model=SurvivalPrediction)
-async def predict_survival_json(
-    background_tasks: BackgroundTasks,
-    patient_data: PatientDataForm = Depends()
-):
-    """Predict survival probabilities and return JSON data"""
-    # This is essentially the same as the original endpoint
-    # Implementation details would be similar to the code above
-    # But return JSON data instead of a plot
-    
-    # For brevity, implementation is omitted here
-    pass
+    return SurvivalPrediction(
+        survival_probabilities=survival_probs,
+        survival_curve=survival_curve_points,
+        explanation=explanation
+    )
