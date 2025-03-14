@@ -6,7 +6,7 @@ from typing import Literal, Annotated, List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
 import joblib
-from openai import OpenAI
+import openai
 import os
 
 app = FastAPI(
@@ -26,8 +26,8 @@ app.add_middleware(
 # Load the trained model
 GBSA = joblib.load('GBSA12.18.pkl')
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("API_KEY"))
+# Set OpenAI API key
+openai.api_key = os.getenv("API_KEY")
 
 # Data point model for survival curve
 class SurvivalTimePoint(BaseModel):
@@ -108,11 +108,13 @@ def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_enco
     """Generate explanation using OpenAI API"""
     
     # Format patient data for prompt
-    age_str = patient_data.age
-    race_str = patient_data.race
-    clinical_str = patient_data.clinical
-    gs_str = patient_data.gs
-    nodes_str = patient_data.nodes
+    age_str = "≤60" if age_encoding[1] == 1 else "61-69" if age_encoding[0] == 1 else "≥70"
+    race_str = "Black" if race_encoding[0] == 1 else "Other" if race_encoding[1] == 1 else "White"
+    clinical_str = "T1-T3a" if clinical_encoding[0] == 1 else "T3b" if clinical_encoding[1] == 1 else "T4"
+    
+    gs_str = "7(4+3)" if gs_encoding[0] == 1 else "8" if gs_encoding[1] == 1 else "≤7(3+4)" if gs_encoding[2] == 1 else "≥9"
+    
+    nodes_str = "≥3" if nodes_encoding[0] == 1 else "No nodes examined" if nodes_encoding[1] == 1 else "1" if nodes_encoding[2] == 1 else "2"
     
     prompt = f"""
     As a medical professional, provide a comprehensive and empathetic interpretation of the survival probabilities for this prostate cancer patient:
@@ -143,8 +145,8 @@ def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_enco
     Write in a clear, compassionate, and professional tone suitable for sharing with both healthcare providers and patients.
     """
     
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    response = openai.ChatCompletion.create(
+        model="gpt-4o",  # Using the model from your original code
         messages=[
             {"role": "system", "content": "You are a medical professional providing detailed explanations of cancer survival predictions."},
             {"role": "user", "content": prompt}
@@ -155,50 +157,37 @@ def get_explanation(patient_data, yv, age_encoding, race_encoding, clinical_enco
     return response.choices[0].message.content.strip()
 
 @app.post("/predict_survival", response_model=SurvivalPrediction, 
-          summary="Predict Survival Probabilities")
+          summary="Predict Survival Probabilities",
+          openapi_extra={"x-chart-type": "line_chart"})
 async def predict_survival(
     background_tasks: BackgroundTasks,
-    patient_data: PatientData
+    patient_data: Annotated[PatientData, Form()]
 ):
     """Predict survival probabilities for prostate cancer patients with lymph node-positive status."""
     
     # Convert categorical variables to one-hot encoding
-    age_encoding = encode_one_hot(patient_data.age, ['≤60', '61-69', '≥70'])
-    race_encoding = encode_one_hot(patient_data.race, ['White', 'Black', 'Other'])
+    age_encoding = encode_one_hot(patient_data.age, ['61-69', '≤60', '≥70'])
+    race_encoding = encode_one_hot(patient_data.race, ['Black', 'Other', 'White'])
     marital_encoding = encode_one_hot(patient_data.marital, ['Married', 'Unmarried'])
     clinical_encoding = encode_one_hot(patient_data.clinical, ['T1-T3a', 'T3b', 'T4'])
     radio_encoding = encode_one_hot(patient_data.radio, ['No', 'Yes'])
     therapy_encoding = encode_one_hot(patient_data.therapy, ['No', 'Yes'])
-    nodes_encoding = encode_one_hot(patient_data.nodes, ['1', '2', '≥3', 'No nodes were examined'])
-    gs_encoding = encode_one_hot(patient_data.gs, ['≤7(3+4)', '7(4+3)', '8', '≥9'])
+    nodes_encoding = encode_one_hot(patient_data.nodes, ['≥3', 'No nodes were examined', '1', '2'])
+    gs_encoding = encode_one_hot(patient_data.gs, ['7(4+3)', '8', '≤7(3+4)', '≥9'])
     
-    # Mapping categorical variables to column names
-    column_mapping = {
-        '≤60': 'Age_<=60', 
-        '61-69': 'Age_61-69', 
-        '≥70': 'Age_>=70',
-        'White': 'Race_White', 
-        'Black': 'Race_Black', 
-        'Other': 'Race_Other',
-        'Married': 'Marital_Married', 
-        'Unmarried': 'Marital_Unmarried',
-        'T1-T3a': 'CS.extension_T1_T3a', 
-        'T3b': 'CS.extension_T3b', 
-        'T4': 'CS.extension_T4',
-        'No': 'Radiation_None/Unknown' if patient_data.radio == 'No' else 'Therapy_None',
-        'Yes': 'Radiation_Yes' if patient_data.radio == 'Yes' else 'Therapy_RP',
-        '1': 'Nodes.positive_One',
-        '2': 'Nodes.positive_Two',
-        '≥3': 'Nodes.positive_>=3',
-        'No nodes were examined': 'Nodes.positive_None',
-        '≤7(3+4)': 'Gleason.Patterns_<=3+4',
-        '7(4+3)': 'Gleason.Patterns_4+3',
-        '8': 'Gleason.Patterns_8',
-        '≥9': 'Gleason.Patterns_>=9'
-    }
+    # Combine all features
+    features = []
+    features.extend(age_encoding)
+    features.extend(race_encoding)
+    features.extend(marital_encoding)
+    features.extend(clinical_encoding)
+    features.extend(radio_encoding)
+    features.extend(therapy_encoding)
+    features.extend(nodes_encoding)
+    features.extend(gs_encoding)
     
-    # Initialize dataframe with all columns set to 0
-    columns = [
+    # Create feature dataframe
+    x_df = pd.DataFrame([features], columns=[
         'Age_61-69', 'Age_<=60', 'Age_>=70',
         'Race_Black', 'Race_Other', 'Race_White',
         'Marital_Married', 'Marital_Unmarried',
@@ -206,33 +195,23 @@ async def predict_survival(
         'Radiation_None/Unknown', 'Radiation_Yes',
         'Therapy_None', 'Therapy_RP',
         'Nodes.positive_>=3', 'Nodes.positive_None', 'Nodes.positive_One', 'Nodes.positive_Two',
-        'Gleason.Patterns_4+3', 'Gleason.Patterns_8', 'Gleason.Patterns_<=3+4', 'Gleason.Patterns_>=9',
-        'PSA'
-    ]
-    x_test = pd.DataFrame(0, index=[0], columns=columns)
+        'Gleason.Patterns_4+3', 'Gleason.Patterns_8', 'Gleason.Patterns_<=3+4', 'Gleason.Patterns_>=9'
+    ])
     
-    # Set values based on patient data
-    x_test[column_mapping[patient_data.age]] = 1
-    x_test[column_mapping[patient_data.race]] = 1
-    x_test[column_mapping[patient_data.marital]] = 1
-    x_test[column_mapping[patient_data.clinical]] = 1
-    x_test[column_mapping[patient_data.radio]] = 1
-    x_test[column_mapping[patient_data.therapy]] = 1
-    x_test[column_mapping[patient_data.nodes]] = 1
-    x_test[column_mapping[patient_data.gs]] = 1
-    x_test['PSA'] = patient_data.psa
+    # Add PSA level
+    x_psa_df = pd.DataFrame([patient_data.psa], columns=['PSA'])
+    x_test = pd.concat([x_df, x_psa_df], axis=1)
     
     # Make prediction
+    prob = GBSA.predict(x_test)
     surv = GBSA.predict_survival_function(x_test)
     
     # Extract survival probabilities at specific time points
     yv = []
     fn = next(iter(surv))
-    time_points = [36, 60, 96, 119]
-    
-    for time_point in time_points:
-        closest_idx = min(range(len(fn.x)), key=lambda i: abs(fn.x[i] - time_point))
-        yv.append(fn(fn.x)[closest_idx])
+    for i in range(0, len(fn.x)):
+        if fn.x[i] in (36, 60, 96, 119):
+            yv.append(fn(fn.x)[i])
     
     # Get explanation
     explanation = get_explanation(
@@ -248,15 +227,16 @@ async def predict_survival(
         "119-month": float(yv[3])
     }
     
-    # Prepare survival curve data points
+    # Prepare survival curve data points (similar to the caloric calculator approach)
     survival_curve_points = []
-    for i in range(len(fn.x)):
-        survival_curve_points.append(
-            SurvivalTimePoint(
-                time=int(fn.x[i]),
-                probability=float(fn(fn.x)[i])
+    for i in range(0, 120):  # 0 to 119 months
+        if i < len(fn.x):
+            survival_curve_points.append(
+                SurvivalTimePoint(
+                    time=int(fn.x[i]),
+                    probability=float(fn(fn.x)[i])
+                )
             )
-        )
     
     return SurvivalPrediction(
         survival_probabilities=survival_probs,
