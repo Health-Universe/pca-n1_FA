@@ -84,13 +84,9 @@ class PatientData(BaseModel):
 
 # Output Model
 class SurvivalPrediction(BaseModel):
-    survival_probabilities: Dict[str, float] = Field(..., 
+    survival_probabilities: str = Field(..., 
         title="Survival Probabilities", 
         description="Predicted survival probabilities at various time points")
-    
-    #survival_curve: List[SurvivalTimePoint] = Field(..., 
-    #    title="Survival Curve Data", 
-     #   description="Data points for plotting the survival curve")
     
     explanation: str = Field(..., 
         title="Explanation", 
@@ -227,6 +223,8 @@ async def predict_survival(
         "119-month": float(yv[3])
     }
     
+    survival_probabilities_str = ", ".join([f"{key}: {value}%" for key, value in survival_probs.items()]) 
+    
     # Prepare survival curve data points (similar to the caloric calculator approach)
     survival_curve_points = []
     for i in range(0, 120):  # 0 to 119 months
@@ -239,7 +237,6 @@ async def predict_survival(
             )
     
     return SurvivalPrediction(
-        survival_probabilities=survival_probs,
-  #      survival_curve=survival_curve_points,
+        survival_probabilities=survival_probabilities_str,
         explanation=explanation
     )
