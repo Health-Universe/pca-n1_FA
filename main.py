@@ -88,9 +88,9 @@ class SurvivalPrediction(BaseModel):
         title="Survival Probabilities", 
         description="Predicted survival probabilities at various time points")
     
-    survival_curve: List[SurvivalTimePoint] = Field(..., 
-        title="Survival Curve Data", 
-        description="Data points for plotting the survival curve")
+    #survival_curve: List[SurvivalTimePoint] = Field(..., 
+    #    title="Survival Curve Data", 
+     #   description="Data points for plotting the survival curve")
     
     explanation: str = Field(..., 
         title="Explanation", 
@@ -240,6 +240,6 @@ async def predict_survival(
     
     return SurvivalPrediction(
         survival_probabilities=survival_probs,
-        survival_curve=survival_curve_points,
+  #      survival_curve=survival_curve_points,
         explanation=explanation
     )
